@@ -4,12 +4,106 @@ use tao::menu::{MenuBar, MenuItem};
 use tao::window::WindowBuilder;
 use tao::dpi::LogicalSize;
 use tao::event_loop::EventLoop;
-use tao::event::Event;
-use std::cell::RefCell;
-use std::rc::Rc;
+use rand::Rng;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
+
+trait GameObject {
+    fn update(&mut self);
+    fn render(&self, frame: &mut [u8]);
+}
+
+struct PixelLoop 
+{
+    objects: Vec<Box<dyn GameObject>>,
+    state: State,
+    accumulator: Duration,
+    current_time: Instant,
+    time: Duration,
+    dt: Duration,
+    pixels: Pixels,
+}
+
+impl PixelLoop {
+    fn new(state: State, update_fps: u64, pixels: Pixels) -> Self {
+        Self {
+            state,
+            pixels,
+            accumulator: Duration::new(0, 0),
+            current_time: Instant::now(),
+            time: Duration::default(),
+            dt: Duration::from_nanos(1_000_000_000 / update_fps),
+            objects: Vec::new(),
+        }
+    }
+
+    fn next_loop(&mut self) {
+        let new_time = Instant::now();
+        let mut frame_time = new_time - self.current_time;
+        self.current_time = new_time;
+
+        if frame_time > Duration::from_millis(100) {
+            frame_time = Duration::from_millis(100);
+        }
+
+        self.accumulator += frame_time;
+
+        while self.accumulator >= self.dt {
+            self.objects.iter_mut().for_each(|obj| obj.update());
+            self.state.update_called += 1;
+            self.accumulator -= self.dt;
+            self.time += self.dt;
+        }
+
+        for (_, pixel) in self.pixels.frame_mut().chunks_exact_mut(4).enumerate() {
+            let rgba = [0, 0, 0, 0];
+            pixel.copy_from_slice(&rgba);
+        }
+
+        self.objects.iter_mut().for_each(|obj| obj.render(self.pixels.frame_mut()));
+        let _ = self.pixels.render();
+        self.state.render_called += 1;
+
+        if self.time > Duration::from_secs(1) {
+            self.display_fps();
+        }
+    }
+    
+    fn add_object(&mut self, object: Box<dyn GameObject>) {
+        self.objects.push(object);
+    }
+
+    fn display_fps(&mut self) {
+        println!("Update fps: {}", self.state.update_called);
+        println!("render fps: {}", self.state.render_called);
+        self.time = Duration::default();
+        self.state.update_called = 0;
+        self.state.render_called = 0;
+    }
+
+}
+
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+}
+
+impl Color {
+    fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self {
+            r,
+            g,
+            b,
+            a,
+        }
+    }
+    fn as_list(&self) -> [u8; 4]{
+        [self.r, self.g, self.b, self.a]
+    }
+}
 
 struct MovingBox {
     box_x: i16,
@@ -17,6 +111,7 @@ struct MovingBox {
     size: i16,
     velocity_x: i16,
     velocity_y: i16,
+    color: Color,
 }
 
 impl MovingBox {
@@ -25,7 +120,8 @@ impl MovingBox {
         box_y: i16,
         size: i16,
         velocity_x: i16,
-        velocity_y: i16
+        velocity_y: i16,
+        color: Color,
     ) -> Self {
         MovingBox{
             box_x,
@@ -33,9 +129,12 @@ impl MovingBox {
             size,
             velocity_x,
             velocity_y,
+            color,
         }
     }
+}
 
+impl GameObject for MovingBox {
     fn update(&mut self) {
         self.box_x += self.velocity_x;
         self.box_y += self.velocity_y;
@@ -63,13 +162,7 @@ impl MovingBox {
                 && y >= self.box_y
                 && y < self.box_y + self.size as i16;
 
-            let rgba = if inside_the_box {
-                [0x5e, 0x48, 0xe8, 0xff]
-            } else {
-                [0x48, 0xb2, 0xe8, 0xff]
-            };
-
-            pixel.copy_from_slice(&rgba);
+            if inside_the_box { pixel.copy_from_slice(&self.color.as_list()) };
         }
     }
 }
@@ -77,6 +170,10 @@ impl MovingBox {
 struct State {
     update_called: u8,
     render_called: u8,
+}
+
+fn random_in_range(range: std::ops::Range<i16>) -> i16 {
+    rand::thread_rng().gen_range(range)
 }
 
 fn main() {
@@ -108,85 +205,22 @@ fn main() {
         render_called: 0,
     };
 
-    let moving_box = Rc::new(RefCell::new(MovingBox::new(
-        0,
-        0,
-        50,
-        1,
-        1,
-    )));
+    let mut pixel_loop = PixelLoop::new(state, 120, pixels);
 
-    pixel_loop_tao(
-        120,
-        |moving_box, state| {
-            let mut borrow_box = moving_box.borrow_mut();
-            borrow_box.update();
-            state.update_called += 1;
+    for _ in 0..10 {
 
-            // std::thread::sleep(Duration::from_millis(4));
-            // println!("Update");
-        },
-        |pixels, moving_box, state| {
-            let borrow_box = moving_box.borrow();
-            borrow_box.render(pixels.frame_mut());
-            state.render_called += 1;
-            let _ = pixels.render();
-            // std::thread::sleep(Duration::from_millis(16));
-            // println!("Render");
-        },
-        event_loop,
-        pixels,
-        moving_box,
-        state,
-    );
-}
+        let moving_box = MovingBox::new(
+            random_in_range(0..270),
+            random_in_range(0..290),
+            random_in_range(20..50),
+            random_in_range(-2..2),
+            random_in_range(-2..2),
+            Color::new(random_in_range(0..255) as u8, random_in_range(0..255) as u8, random_in_range(0..255) as u8, 255),
+        );
+        pixel_loop.add_object(Box::new(moving_box));
+    }
 
-fn pixel_loop_tao(
-    update_fps: u64, 
-    update: fn(Rc<RefCell<MovingBox>>, &mut State), 
-    render: fn(&mut Pixels, Rc<RefCell<MovingBox>>, &mut State),
-    event_loop: EventLoop<()>,
-    mut pixels: Pixels,
-    moving_box: Rc<RefCell<MovingBox>>,
-    mut state: State,
-    
-) {
-    let mut t = Duration::default();
-    let dt = Duration::from_nanos(1_000_000_000 / update_fps);
-
-    let mut current_time = Instant::now();
-    let mut accumulator = Duration::new(0, 0);
-
-    event_loop.run(move |event, _, _| {
-        match event {
-            Event::MainEventsCleared => {
-                let new_time = Instant::now();
-                let mut frame_time = new_time - current_time;
-                current_time = new_time;
-
-                if frame_time > Duration::from_millis(100) {
-                    frame_time = Duration::from_millis(100);
-                }
-
-                accumulator += frame_time;
-
-                while accumulator >= dt {
-                    update(Rc::clone(&moving_box), &mut state);
-                    accumulator -= dt;
-                    t += dt;
-                }
-
-                render(&mut pixels, Rc::clone(&moving_box), &mut state);
-
-                if t > Duration::from_secs(1) {
-                    println!("Update fps: {}", state.update_called);
-                    println!("render fps: {}", state.render_called);
-                    t = Duration::default();
-                    state.update_called = 0;
-                    state.render_called = 0;
-                }
-            }
-            _ => {}
-        }
-    });
+    loop {
+        pixel_loop.next_loop();
+    }
 }
